@@ -14,6 +14,7 @@ import math
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
+import plot
 from datetime import datetime
 from operator import itemgetter
 from random import random
@@ -1584,190 +1585,6 @@ def report(instance, filename, commodities=None, sites=None):
                     timeseries[(co, sit)].to_excel(writer, sheet_name)
 
 
-def plot(prob, com, sit, timesteps=None, power_unit='MW', energy_unit='MWh'):
-    """Plot a stacked timeseries of commodity balance and storage.
-
-    Creates a stackplot of the energy balance of a given commodity, together
-    with stored energy in a second subplot.
-
-    Args:
-        prob: urbs model instance
-        com: commodity name to plot
-        sit: site name to plot
-        timesteps: optional list of  timesteps to plot; default: prob.tm
-        power_unit: optional string for unit; default: 'MW'
-        energy_unit: optional string for storage plot; default: 'MWh'
-
-    Returns:
-        fig: figure handle
-    """
-    import matplotlib.pyplot as plt
-    import matplotlib as mpl
-
-    if timesteps is None:
-        # default to all simulated timesteps
-        timesteps = sorted(get_entity(prob, 'tm').index)
-
-    # FIGURE
-    fig = plt.figure(figsize=(16, 8))
-    gs = mpl.gridspec.GridSpec(2, 1, height_ratios=[2, 1])
-
-    created, consumed, stored, imported, exported = get_timeseries(
-        prob, com, sit, timesteps)
-
-    costs, cpro, ctra, csto = get_constants(prob)
-
-    # move retrieved/stored storage timeseries to created/consumed and
-    # rename storage columns back to 'storage' for color mapping
-    created = created.join(stored['Retrieved'])
-    consumed = consumed.join(stored['Stored'])
-    created.rename(columns={'Retrieved': 'Storage'}, inplace=True)
-    consumed.rename(columns={'Stored': 'Storage'}, inplace=True)
-
-    # only keep storage content in storage timeseries
-    stored = stored['Level']
-
-    # add imported/exported timeseries
-    created = created.join(imported)
-    consumed = consumed.join(exported)
-
-    # move demand to its own plot
-    demand = consumed.pop('Demand')
-
-    # remove all columns from created which are all-zeros in both created and
-    # consumed (except the last one, to prevent a completely empty frame)
-    for col in created.columns:
-        if not created[col].any() and len(created.columns) > 1:
-            if col not in consumed.columns or not consumed[col].any():
-                created.pop(col)
-
-    # sorting plot elements
-    for elements in [created,consumed]:
-        if len(elements.columns) > 1:
-            # calculate standard deviation
-            std = pd.DataFrame(np.zeros_like(elements.tail(1)),
-                               index=elements.index[-1:]+1, columns=elements.columns)
-            for col in std.columns:
-                std[col] = np.std(elements[col])
-            # sort created/consumed ascencing with std i.e. base load first
-            elements = elements.append(std)
-            new_columns = elements.columns[elements.ix[elements.last_valid_index()].argsort()]
-            elements = elements[new_columns][:-1]
-
-    # PLOT CREATED
-    ax0 = plt.subplot(gs[0])
-    sp0 = ax0.stackplot(created.index, created.as_matrix().T, linewidth=0.15)
-
-    # Unfortunately, stackplot does not support multi-colored legends itself.
-    # Therefore, a so-called proxy artist - invisible objects that have the
-    # correct color for the legend entry - must be created. Here, Rectangle
-    # objects of size (0,0) are used. The technique is explained at
-    # http://stackoverflow.com/a/22984060/2375855
-    proxy_artists = []
-    for k, commodity in enumerate(created.columns):
-        commodity_color = to_color(commodity)
-
-        sp0[k].set_facecolor(commodity_color)
-        sp0[k].set_edgecolor(to_color('Decoration'))
-
-        proxy_artists.append(mpl.patches.Rectangle(
-            (0, 0), 0, 0, facecolor=commodity_color))
-
-    # label
-    ax0.set_title('Energy balance of {} in {}'.format(com, sit))
-    ax0.set_ylabel('Power ({})'.format(power_unit))
-
-    # legend
-    # add "only" consumed commodities to the legend
-    lg_items = tuple(created.columns)
-    for item in consumed.columns:
-        # if item not in created add to legend, except items
-        # from consumed which are all-zeros
-        if item in created.columns or not consumed[item].any():
-            pass
-        else:
-            # add item/commodity is not consumed
-            commodity_color = to_color(item)
-            proxy_artists.append(mpl.patches.Rectangle(
-                (0, 0), 0, 0, facecolor=commodity_color))
-            lg_items = lg_items + (item,)
-
-    lg = ax0.legend(proxy_artists,
-                    lg_items,
-                    frameon=False,
-                    ncol=len(proxy_artists),
-                    loc='upper center',
-                    bbox_to_anchor=(0.5, -0.01))
-    plt.setp(lg.get_patches(), edgecolor=to_color('Decoration'),
-             linewidth=0.15)
-    plt.setp(ax0.get_xticklabels(), visible=False)
-
-    # PLOT CONSUMED
-    sp00 = ax0.stackplot(consumed.index, -consumed.as_matrix().T,
-                         linewidth=0.15)
-
-    # color
-    for k, commodity in enumerate(consumed.columns):
-        commodity_color = to_color(commodity)
-
-        sp00[k].set_facecolor(commodity_color)
-        sp00[k].set_edgecolor((.5, .5, .5))
-
-    # PLOT DEMAND
-    ax0.plot(demand.index, demand.values, linewidth=1.2,
-             color=to_color('Demand'))
-
-    # PLOT STORAGE
-    ax1 = plt.subplot(gs[1], sharex=ax0)
-    sp1 = ax1.stackplot(stored.index, stored.values, linewidth=0.15)
-
-    # color
-    sp1[0].set_facecolor(to_color('Storage'))
-    sp1[0].set_edgecolor(to_color('Decoration'))
-
-    # labels & y-limits
-    ax1.set_xlabel('Time in year (h)')
-    ax1.set_ylabel('Energy ({})'.format(energy_unit))
-    try:
-        ax1.set_ylim((0, 0.5 + csto.loc[sit, :, com]['C Total'].sum()))
-    except KeyError:
-        pass
-
-    # make xtick distance duration-dependent
-    if len(timesteps) > 26*168:
-        steps_between_ticks = 168*4
-    elif len(timesteps) > 3*168:
-        steps_between_ticks = 168
-    elif len(timesteps) > 2 * 24:
-        steps_between_ticks = 24
-    elif len(timesteps) > 24:
-        steps_between_ticks = 6
-    else:
-        steps_between_ticks = 3
-    xticks = timesteps[::steps_between_ticks]
-
-    # set limits and ticks for both axes
-    for ax in [ax0, ax1]:
-        # ax.set_axis_bgcolor((0, 0, 0, 0))
-        plt.setp(ax.spines.values(), color=to_color('Decoration'))
-        ax.set_frame_on(False)
-        ax.set_xlim((timesteps[0], timesteps[-1]))
-        ax.set_xticks(xticks)
-        ax.xaxis.grid(True, 'major', color=to_color('Grid'),
-                      linestyle='-')
-        ax.yaxis.grid(True, 'major', color=to_color('Grid'),
-                      linestyle='-')
-        ax.xaxis.set_ticks_position('none')
-        ax.yaxis.set_ticks_position('none')
-
-        # group 1,000,000 with commas
-        group_thousands = mpl.ticker.FuncFormatter(
-            lambda x, pos: '{:0,d}'.format(int(x)))
-        ax.yaxis.set_major_formatter(group_thousands)
-
-    return fig
-
-
 def result_figures(prob, figure_basename, plot_title_prefix=None, periods={}, **kwds):
     """Create plot for each site and demand commodity and save to files.
     
@@ -1787,7 +1604,7 @@ def result_figures(prob, figure_basename, plot_title_prefix=None, periods={}, **
     for sit, com in prob.demand.columns:
         for period, timesteps in periods.items():
             # do the plotting
-            fig = plot(prob, com, sit, timesteps=timesteps, **kwds)
+            fig = plot.figure(prob, com, sit, timesteps=timesteps, **kwds)
 
             # change the figure title
             ax0 = fig.get_axes()[0]
